@@ -1,0 +1,100 @@
+diff --git a/software/libdvi/data_packet.h b/software/libdvi/data_packet.h
+index e5f6723..d9cff0e 100644
+--- a/software/libdvi/data_packet.h
++++ b/software/libdvi/data_packet.h
+@@ -61,6 +61,9 @@ typedef enum {
+ } RGB_quantization_range;
+ 
+ typedef enum {
++    // LOCAL PATCH (playdate-dock): VIC 0 means "no CEA format given", which is
++    // the correct and honest answer for a timing that is not in the standard.
++    _NO_VIDEO_CODE = 0,
+     _640x480P60 = 1,
+     _720x480P60 = 2,
+     _1280x720P60 = 4,
+diff --git a/software/libdvi/dvi.c b/software/libdvi/dvi.c
+index 05b2618..dba0dba 100644
+--- a/software/libdvi/dvi.c
++++ b/software/libdvi/dvi.c
+@@ -41,6 +41,8 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
+         inst->dma_cfg[i].tx_fifo = (void*)&inst->ser_cfg.pio->txf[inst->ser_cfg.sm_tmds[i]];
+         inst->dma_cfg[i].dreq = pio_get_dreq(inst->ser_cfg.pio, inst->ser_cfg.sm_tmds[i], true);
+     }
++    inst->vertical_repeat_mask = DVI_VERTICAL_REPEAT - 1;
++    inst->vertical_repeat_mask_next = inst->vertical_repeat_mask;
+     inst->late_scanline_ctr = 0;
+     inst->tmds_buf_release[0] = NULL;
+     inst->tmds_buf_release[1] = NULL;
+@@ -73,8 +75,14 @@ void dvi_init(struct dvi_inst *inst, uint spinlock_tmds_queue, uint spinlock_col
+         queue_add_blocking_u32(&inst->q_tmds_free, &tmdsbuf);
+     }
+ 
+-    set_AVI_info_frame(&inst->avi_info_frame, UNDERSCAN, RGB, ITU601, PIC_ASPECT_RATIO_4_3, SAME_AS_PAR, FULL,
+-                       (inst->timing->h_active_pixels == 720) ? _720x576P50 : _640x480P60);
++    // LOCAL PATCH (playdate-dock): only claim a CEA video code when the timing
++    // actually is one. This firmware also runs 800x480, which is in no table,
++    // and telling a TV that an 800 pixel wide picture is 640x480p60 invites it
++    // to rescale a picture that was previously arriving unmolested.
++    video_code vic = _NO_VIDEO_CODE;
++    if (inst->timing->h_active_pixels == 720)      vic = _720x576P50;
++    else if (inst->timing->h_active_pixels == 640) vic = _640x480P60;
++    set_AVI_info_frame(&inst->avi_info_frame, UNDERSCAN, RGB, ITU601, PIC_ASPECT_RATIO_4_3, SAME_AS_PAR, FULL, vic);
+ 
+ }
+ 
+@@ -268,14 +276,14 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
+                 is_blank_line = true;
+             } else {
+                 if (queue_try_peek_u32(&inst->q_tmds_valid, &tmdsbuf)) {
+-                    if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1) {
++                    if ((inst->timing_state.v_ctr & inst->vertical_repeat_mask) == inst->vertical_repeat_mask) {
+                         queue_remove_blocking_u32(&inst->q_tmds_valid, &tmdsbuf);
+                         inst->tmds_buf_release[0] = tmdsbuf;
+                     }
+                 } else {
+                     // No valid scanline was ready (generates solid red scanline)
+                     tmdsbuf = NULL;
+-                    if (inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1) {
++                    if ((inst->timing_state.v_ctr & inst->vertical_repeat_mask) == inst->vertical_repeat_mask) {
+                         ++inst->late_scanline_ctr;
+                     }
+                 }
+@@ -294,13 +302,15 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
+                 dma_list_selected = &inst->dma_list_error;
+             }
+ 
+-            if (inst->scanline_callback && inst->timing_state.v_ctr % DVI_VERTICAL_REPEAT == DVI_VERTICAL_REPEAT - 1) {
+-                inst->scanline_callback(inst->timing_state.v_ctr / DVI_VERTICAL_REPEAT);
++            if (inst->scanline_callback && (inst->timing_state.v_ctr & inst->vertical_repeat_mask) == inst->vertical_repeat_mask) {
++                inst->scanline_callback(inst->timing_state.v_ctr >> (inst->vertical_repeat_mask ? 1 : 0));
+             }
+         }
+         break;
+ 
+         case DVI_STATE_SYNC:
++            // Once per frame, outside the active region: safe to change.
++            inst->vertical_repeat_mask = inst->vertical_repeat_mask_next;
+             dma_list_selected = &inst->dma_list_vblank_sync;
+             if (inst->timing_state.v_ctr == 0) {
+                 ++inst->dvi_frame_count;
+diff --git a/software/libdvi/dvi.h b/software/libdvi/dvi.h
+index a445c26..e1adb78 100644
+--- a/software/libdvi/dvi.h
++++ b/software/libdvi/dvi.h
+@@ -26,6 +26,16 @@ struct dvi_inst {
+ 	struct dvi_timing_state timing_state;
+ 	struct dvi_serialiser_cfg ser_cfg;
+     dvi_blank_t blank_settings;
++	// LOCAL PATCH (playdate-dock): vertical repeat as a runtime value rather
++	// than a compile-time macro, because this firmware carries two output modes
++	// in one binary and switches between full and half scanout while running.
++	// Stored as a mask so the IRQ stays branchless: 0 means every scanline,
++	// 1 means every other one. Write vertical_repeat_mask_next, never the live
++	// one: it is latched during vertical sync so the change lands on a frame
++	// boundary. One buffer of producer/consumer disagreement rolls the picture
++	// permanently, because nothing re-syncs the queue to a vertical position.
++	uint32_t vertical_repeat_mask;
++	uint32_t vertical_repeat_mask_next;
+ 	// Called in the DMA IRQ once per scanline -- careful with the run time!
+ 	dvi_callback_t scanline_callback;
+ 

@@ -1,0 +1,65 @@
+diff --git a/src/portable/raspberrypi/rp2040/hcd_rp2040.c b/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+index 064834e..a34de3b 100644
+--- a/src/portable/raspberrypi/rp2040/hcd_rp2040.c
++++ b/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+@@ -58,6 +58,8 @@ static hw_endpoint_t *epx = &ep_pool[0]; // current active endpoint
+ 
+   #ifndef HAS_STOP_EPX_ON_NAK
+ static volatile bool epx_switch_request = false;
++// LOCAL PATCH: count spurious sequence errors rather than dying on them.
++volatile uint32_t hcd_rp2040_seq_errors = 0;
+   #endif
+ 
+ enum {
+@@ -142,7 +144,16 @@ static void __tusb_irq_path_func(sie_start_xfer)(bool send_setup, bool is_rx, bo
+   // described in RP2040 Datasheet, release 2.1, section "4.1.2.5.1. Concurrent access".!
+   // We write everything except the START_TRANS bit first, then wait some cycles.
+   usb_hw->sie_ctrl = sie_ctrl;
+-  busy_wait_at_least_cycles(12);
++  // LOCAL PATCH (playdate-dock): the upstream value is 12, but
++  // busy_wait_at_least_cycles counts CPU cycles while the delay this is
++  // standing in for is measured in 48 MHz SIE cycles — about 250 ns. At
++  // 125 MHz the two happen to be close enough; at the 295.2 MHz this
++  // firmware runs for 800x480 DVI, 12 cycles is 41 ns, roughly six times
++  // too short. Transfers then intermittently fail and the host stack
++  // eventually wedges under sustained load. 96 cycles is >=325 ns at any
++  // clock we use, and costs ~0.4% at full transfer rate.
++  // See tinyusb issue #3533.
++  busy_wait_at_least_cycles(96);
+   usb_hw->sie_ctrl = sie_ctrl | USB_SIE_CTRL_START_TRANS_BITS;
+ }
+ 
+@@ -396,7 +407,18 @@ static void __tusb_irq_path_func(hcd_rp2040_irq)(void) {
+ 
+   if (status & USB_INTS_ERROR_DATA_SEQ_BITS) {
+     usb_hw_clear->sie_status = USB_SIE_STATUS_DATA_SEQ_ERROR_BITS;
+-    panic("Data Seq Error \n");
++    // LOCAL PATCH (playdate-dock): upstream calls panic() here, which on RP2040
++    // is an infinite loop — the chip is simply dead until something resets it.
++    //
++    // That is far too harsh for this condition. The RP2040's SIE shares one set
++    // of handshake latches across EPX and the interrupt endpoint, so a transfer
++    // that was actually ACKed can surface spuriously as DATA_SEQ_ERROR under
++    // load (tinyusb issue #3533). Panicking turns a recoverable glitch into a
++    // hang, which is exactly what was rebooting this dock during busy scenes.
++    //
++    // Clear it and carry on. A genuinely lost transfer shows up as a stalled
++    // stream, and the keepalive watchdog already rebuilds from that.
++    hcd_rp2040_seq_errors++;
+   }
+ }
+ 
+@@ -703,8 +725,11 @@ bool hcd_edpt_clear_stall(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+   (void)dev_addr;
+   (void)ep_addr;
+ 
+-  panic("hcd_clear_stall");
+-  // return true;
++  // LOCAL PATCH (playdate-dock): upstream panics here, i.e. hangs the chip, for
++  // an operation it simply never implemented. Report success and let the host
++  // stack proceed; a still-stalled endpoint surfaces as a failed transfer,
++  // which is recoverable. A hang is not.
++  return true;
+ }
+ 
+ #endif

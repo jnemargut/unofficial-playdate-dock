@@ -1,0 +1,15 @@
+# Dependencies, fetched by setup.sh
+lib/
+
+# A 1 GB ARM toolchain does not belong in a git repo
+toolchain/
+
+# Build output
+build/
+build_host/
+
+.DS_Store
+.whogitit/
+
+# Claude Code session scratch
+.bettercompact/
