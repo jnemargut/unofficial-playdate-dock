@@ -11,6 +11,8 @@ It runs at about 34 frames a second, fills the whole screen, and works with any
 game, because as far as the Playdate is concerned nothing unusual is happening.
 You don't install anything on the Playdate itself.
 
+<img src="docs/demo.gif" width="300" alt="Plugging a Playdate into the module, then the same screen showing up on a TV">
+
 > **This is an unofficial fan project.** It is not made by Panic, not endorsed by
 > Panic, and not endorsed by Flipper Devices either. Playdate is Panic's. Flipper
 > Zero is Flipper Devices'. I just wired them together.
